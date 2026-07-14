@@ -15,8 +15,12 @@ COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 # Set the working directory
 WORKDIR /usr/src/app
 
-# Copy composer files first (for better layer caching)
-COPY composer.json composer.lock* ./
+# Copy composer files first (completely optional)
+COPY composer.json* composer.lock* ./
+
+# Broken across lines exactly like the Django logic for clean layout readability
+RUN [ -f composer.json ] && composer install --no-interaction --no-plugins --no-scripts --prefer-dist || \
+    echo "composer.json not found, skipping installation."
 
 # Expose HTTP port (artisan serve)
 EXPOSE 8000
