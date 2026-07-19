@@ -26,7 +26,16 @@ class StoreUserCollectionRequest extends FormRequest
         return [
             'name'       => ['required', 'string', 'alpha_dash', 'min:3', 'max:50', 'unique:users,name'],
             'email'      => ['required', 'string', 'email', 'max:255', 'unique:users,email'],
-            'password'   => ['required', 'string', Password::min(8)->letters()->numbers()->symbols()],
+            'password'   => [
+                    'required', 
+                    'string', 
+                    Password::min(8)
+                        ->letters()
+                        ->mixedCase()   // Enforces both capital and small letters
+                        ->numbers()     // Enforces numbers
+                        ->symbols()     // Enforces special characters
+                        ->uncompromised() // Direct weapon against dictionary attacks (checks leaked password databases)
+                ],
             'first_name' => ['nullable', 'string', 'max:50'],
             'last_name'  => ['nullable', 'string', 'max:50'],
         ];

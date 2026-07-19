@@ -42,17 +42,25 @@ class AuthController extends Controller
 
     public function login(Request $request): JsonResponse
     {
+        // 1. Enforce strict validation matching your registration rules exactly
         $credentials = $request->validate([
-            'name'     => ['required', 'string'],
-            'password' => ['required', 'string'],
+            'name'     => ['required', 'string', 'alpha_dash', 'min:3', 'max:50'],
+            'email'    => ['required', 'string', 'email', 'max:255'],
+            'password' => ['required', 'string'], // Only 'required' and 'string' are checked on login
         ]);
 
-        if (!Auth::attempt(['name' => $credentials['name'], 'password' => $credentials['password']])) {
+        // 2. Attempt multi-column authentication alignment
+        if (!Auth::attempt([
+            'name'     => $credentials['name'], 
+            'email'    => $credentials['email'], 
+            'password' => $credentials['password']
+        ])) {
             return response()->json([
                 'message' => 'Invalid structural credentials provided.'
             ], Response::HTTP_UNAUTHORIZED);
         }
 
+        // 3. Complete authentication workflow and return tokens
         $user = Auth::user();
         $tokenResult = $user->createToken('auth_token');
 
