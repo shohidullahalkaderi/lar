@@ -12,31 +12,20 @@ class UserSeeder extends Seeder
     {
         $profiles = [
             [
-                'name'   => 'backend_admin',
+                'name'       => 'backend_admin',
                 'email'      => 'admin@enterprise.internal',
-                'password'   => 'DevSecureAdminPass2026!',
-                'first_name' => 'Shohidullah',
+                'password'   => Hash::make('DevSecureAdminPass2026!'),
+                'first_name' => 'Laravel',
                 'last_name'  => 'Admin',
-            ],
-            [
-                'name'   => 'qa_tester',
-                'email'      => 'tester@enterprise.internal',
-                'password'   => 'TestAutomationPass2026!',
-                'first_name' => 'Quality',
-                'last_name'  => 'Assurance',
             ]
         ];
 
         foreach ($profiles as $profile) {
             User::updateOrCreate(
                 ['name' => $profile['name']],
-                [
-                    'email'      => $profile['email'],
-                    'password'   => Hash::make($profile['password']),
-                    'first_name' => $profile['first_name'],
-                    'last_name'  => $profile['last_name'],
-                ]
+                $profile
             );
+
         }
     }
 }
