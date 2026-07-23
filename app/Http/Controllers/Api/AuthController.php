@@ -8,15 +8,12 @@ use App\Http\Resources\UserResource;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Hash;
 use Symfony\Component\HttpFoundation\Response;
 
 class AuthController extends Controller
 {
-    private const CACHE_TTL = 86400; // 24 Hours tracking retention
-
     public function register(StoreUserCollectionRequest $request): JsonResponse
     {
         $validated = $request->validated();
@@ -31,9 +28,6 @@ class AuthController extends Controller
 
         $tokenResult = $user->createToken('auth_token');
         
-        // Cache user model payload in Redis using the token identifier
-        Cache::put("user_session_{$tokenResult->plainTextToken}", $user, self::CACHE_TTL);
-
         return response()->json([
             'user'  => new UserResource($user),
             'token' => $tokenResult->plainTextToken
@@ -42,30 +36,22 @@ class AuthController extends Controller
 
     public function login(Request $request): JsonResponse
     {
-        // 1. Enforce strict validation matching your registration rules exactly
+        // 1. Validate email format and password input
         $credentials = $request->validate([
-            'name'     => ['required', 'string', 'alpha_dash', 'min:3', 'max:50'],
-            'email'    => ['required', 'string', 'email', 'max:255'],
-            'password' => ['required', 'string'], // Only 'required' and 'string' are checked on login
+            'email'    => ['required', 'string', 'email'],
+            'password' => ['required', 'string'],
         ]);
 
-        // 2. Attempt multi-column authentication alignment
-        if (!Auth::attempt([
-            'name'     => $credentials['name'], 
-            'email'    => $credentials['email'], 
-            'password' => $credentials['password']
-        ])) {
+        // 2. Attempt authentication using email and password
+        if (!Auth::attempt($credentials)) {
             return response()->json([
-                'message' => 'Invalid structural credentials provided.'
+                'message' => 'Invalid credentials provided.'
             ], Response::HTTP_UNAUTHORIZED);
         }
 
-        // 3. Complete authentication workflow and return tokens
+        // 3. Issue token for authenticated user
         $user = Auth::user();
         $tokenResult = $user->createToken('auth_token');
-
-        // Prime the high-performance Redis read cache layer
-        Cache::put("user_session_{$tokenResult->plainTextToken}", $user, self::CACHE_TTL);
 
         return response()->json([
             'user'  => new UserResource($user),
@@ -76,15 +62,25 @@ class AuthController extends Controller
     public function logout(Request $request): JsonResponse
     {
         $user = $request->user();
-        $currentToken = $request->bearerToken();
 
-        // Evict token cache mapping instantly from Redis
-        if ($currentToken) {
-            Cache::forget("user_session_{$currentToken}");
+        // Guard against null user
+        if (!$user) {
+            return response()->json([
+                'message' => 'Unauthenticated.'
+            ], Response::HTTP_UNAUTHORIZED);
         }
 
-        // Revoke token record from database storage
-        $user->currentAccessToken()->delete();
+        $token = $user->currentAccessToken();
+
+        // Guard against missing or null token instance
+        if (!$token) {
+            return response()->json([
+                'message' => 'Invalid or already revoked access token.'
+            ], Response::HTTP_UNAUTHORIZED);
+        }
+
+        // Revoke current active token
+        $token->delete();
 
         return response()->json([
             'message' => 'Successfully logged out from active session.'
