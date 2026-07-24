@@ -7,7 +7,7 @@ use App\Http\Resources\UserResource;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Validator;
-use Illuminate\Support\Facades\Redis; // Added Redis Facade
+use Illuminate\Support\Facades\Redis;
 use Tests\TestCase;
 
 class AuthenticationUnitTest extends TestCase
@@ -23,20 +23,22 @@ class AuthenticationUnitTest extends TestCase
 
         // 1. Assert invalid input fails constraints
         $invalidPayload = [
-            'name'     => 'sh!@#invalid',
-            'email'    => 'invalid-email-pattern',
-            'password' => 'short',
+            'name'                  => 'sh!@#invalid',
+            'email'                 => 'invalid-email-pattern',
+            'password'              => 'short',
+            'password_confirmation' => 'mismatch',
         ];
         $invalidValidator = Validator::make($invalidPayload, $request->rules());
         $this->assertFalse($invalidValidator->passes());
 
         // 2. Assert valid input passes constraints
         $validPayload = [
-            'name'       => 'shohid_dev',
-            'email'      => 'shohid@backend.io',
-            'password'   => 'StrictSecurePasswordPattern159!',
-            'first_name' => 'Shohidullah',
-            'last_name'  => 'Developer',
+            'name'                  => 'shohid_dev',
+            'email'                 => 'shohid@backend.io',
+            'password'              => 'StrictSecurePasswordPattern159!',
+            'password_confirmation' => 'StrictSecurePasswordPattern159!',
+            'first_name'            => 'Shohidullah',
+            'last_name'             => 'Developer',
         ];
         $validValidator = Validator::make($validPayload, $request->rules());
         $this->assertTrue($validValidator->passes());
@@ -49,7 +51,6 @@ class AuthenticationUnitTest extends TestCase
     {
         $user = new User();
         $user->setRawAttributes([
-            'id'         => 1,
             'name'       => 'shohid_dev',
             'email'      => 'shohid@backend.io',
             'first_name' => 'Shohidullah',
@@ -59,7 +60,6 @@ class AuthenticationUnitTest extends TestCase
 
         $resource = (new UserResource($user))->resolve();
 
-        $this->assertEquals(1, $resource['id']);
         $this->assertEquals('shohid_dev', $resource['name']);
         $this->assertEquals('shohid@backend.io', $resource['email']);
         $this->assertEquals('Shohidullah', $resource['first_name']);

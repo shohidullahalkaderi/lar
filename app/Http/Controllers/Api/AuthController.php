@@ -10,47 +10,63 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\Response;
 
 class AuthController extends Controller
 {
     public function register(StoreUserCollectionRequest $request): JsonResponse
-    {
-        $validated = $request->validated();
-        
-        $user = User::create([
-            'name'       => $validated['name'],
-            'email'      => $validated['email'],
-            'password'   => Hash::make($validated['password']),
-            'first_name' => $validated['first_name'] ?? null,
-            'last_name'  => $validated['last_name'] ?? null,
-        ]);
+{
+    $validated = $request->validated();
 
-        $tokenResult = $user->createToken('auth_token');
-        
-        return response()->json([
-            'user'  => new UserResource($user),
-            'token' => $tokenResult->plainTextToken
-        ], Response::HTTP_CREATED);
-    }
+    $email = strtolower(trim($validated['email']));
+
+    // Safely handle optional name
+    $nameInput = $validated['name'] ?? null;
+    $name = !empty($nameInput) 
+        ? trim($nameInput) 
+        : Str::slug(explode('@', $email)[0], '_') . '_' . Str::random(8);
+
+    $user = User::create([
+        'name'       => $name,
+        'email'      => $email,
+        'password'   => Hash::make($validated['password']),
+        'first_name' => $validated['first_name'] ?? null,
+        'last_name'  => $validated['last_name'] ?? null,
+    ]);
+
+    $tokenResult = $user->createToken('auth_token');
+
+    return response()->json([
+        'user'  => new UserResource($user),
+        'token' => $tokenResult->plainTextToken
+    ], Response::HTTP_CREATED);
+}
 
     public function login(Request $request): JsonResponse
     {
-        // 1. Validate email format and password input
-        $credentials = $request->validate([
-            'email'    => ['required', 'string', 'email'],
-            'password' => ['required', 'string'],
-        ]);
-
-        // 2. Attempt authentication using email and password
-        if (!Auth::attempt($credentials)) {
+        $credentials = $request->only(['email', 'password']);
+        if (empty($credentials['email']) || empty($credentials['password'])) {
             return response()->json([
-                'message' => 'Invalid credentials provided.'
+                'detail' => 'Invalid credentials provided.'
+            ], Response::HTTP_BAD_REQUEST);
+        }
+
+        if (!Auth::attempt(['email' => strtolower(trim($credentials['email'])), 'password' => $credentials['password']])) {
+            return response()->json([
+                'detail' => 'Invalid login credentials provided.'
             ], Response::HTTP_UNAUTHORIZED);
         }
 
-        // 3. Issue token for authenticated user
+        /** @var \App\Models\User $user */
         $user = Auth::user();
+
+        if (isset($user->is_active) && !$user->is_active) {
+            return response()->json([
+                'detail' => 'Account disabled.'
+            ], Response::HTTP_FORBIDDEN);
+        }
+
         $tokenResult = $user->createToken('auth_token');
 
         return response()->json([
@@ -61,29 +77,10 @@ class AuthController extends Controller
 
     public function logout(Request $request): JsonResponse
     {
-        $user = $request->user();
-
-        // Guard against null user
-        if (!$user) {
-            return response()->json([
-                'message' => 'Unauthenticated.'
-            ], Response::HTTP_UNAUTHORIZED);
-        }
-
-        $token = $user->currentAccessToken();
-
-        // Guard against missing or null token instance
-        if (!$token) {
-            return response()->json([
-                'message' => 'Invalid or already revoked access token.'
-            ], Response::HTTP_UNAUTHORIZED);
-        }
-
-        // Revoke current active token
-        $token->delete();
+        $request->user()->currentAccessToken()->delete();
 
         return response()->json([
-            'message' => 'Successfully logged out from active session.'
+            'detail' => 'Successfully logged out.'
         ], Response::HTTP_OK);
     }
 }
