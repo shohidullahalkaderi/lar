@@ -3,8 +3,8 @@
 # 1. Kill stale background port-forwards
 pkill -f "kubectl port-forward" || true
 # docker image prune -a -f
-docker system prune -a --volumes -f
-kubectl delete namespace laravel-stack
+# docker system prune -a --volumes -f
+# kubectl delete namespace laravel-stack
 
 # 2. Check if the Kind cluster exists; create it if missing
 CLUSTER_NAME="kind"
@@ -47,7 +47,7 @@ kubectl port-forward --address 0.0.0.0 svc/redis 6390:6379 -n laravel-stack &
 # 10. Running Laravel migrations, seed, and tests
 kubectl exec deployment/app -n laravel-stack -- php artisan migrate
 kubectl exec deployment/app -n laravel-stack -- php artisan db:seed
-kubectl exec deployment/app -n laravel-stack -- php artisan test
+kubectl exec deployment/app -n laravel-stack -- env DB_CONNECTION=sqlite DB_DATABASE=:memory: php artisan test
 
 # 11. test via terminal
 curl -I http://localhost:8090

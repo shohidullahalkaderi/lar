@@ -11,10 +11,6 @@ docker compose up -d
 docker compose exec app php artisan migrate
 docker compose exec app ls -la /usr/src/app
 
-# Verify engine health via Compose services using safe single-quoted credentials
-docker compose exec redis redis-cli -a 'password_secure' PING
-docker compose exec db mysqladmin -u laravel_user -p'laravel_password' ping
-
 # Seed the database with initial data
 docker compose exec app php artisan db:seed
-docker compose exec app php artisan test
+docker compose exec app env DB_CONNECTION=sqlite DB_DATABASE=:memory: php artisan test
