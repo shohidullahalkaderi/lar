@@ -22,7 +22,10 @@ COPY composer.json* composer.lock* ./
 RUN [ -f composer.json ] && composer install --no-interaction --no-plugins --no-scripts --prefer-dist || \
     echo "composer.json not found, skipping installation."
 
-# Expose HTTP port (artisan serve)
+# Explicitly copy remaining codebase into WORKDIR
+COPY . .
+
+# Expose HTTP port 
 EXPOSE 8000
 
 # Default command – runs the Laravel development server
