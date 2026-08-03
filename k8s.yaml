@@ -1,13 +1,26 @@
 apiVersion: v1
+kind: Secret
+metadata:
+  name: laravel-secrets
+  labels:
+    app.kubernetes.io/name: laravel-app
+type: Opaque
+stringData:
+  DB_PASSWORD: "laravel_password"
+  MYSQL_ROOT_PASSWORD: "root_password"
+  REDIS_PASSWORD: "password_secure"
+
+---
+apiVersion: v1
 kind: Service
 metadata:
+  name: app
   labels:
     io.kompose.service: app
-  name: app
 spec:
   type: ClusterIP
   ports:
-    - name: "http"
+    - name: http
       port: 8000
       targetPort: 8000
   selector:
@@ -17,13 +30,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  name: db
   labels:
     io.kompose.service: db
-  name: db
 spec:
   type: ClusterIP
   ports:
-    - name: "mysql"
+    - name: mysql
       port: 3306
       targetPort: 3306
   selector:
@@ -33,13 +46,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  name: redis
   labels:
     io.kompose.service: redis
-  name: redis
 spec:
   type: ClusterIP
   ports:
-    - name: "redis"
+    - name: redis
       port: 6379
       targetPort: 6379
   selector:
@@ -49,9 +62,9 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  name: app
   labels:
     io.kompose.service: app
-  name: app
 spec:
   replicas: 1
   selector:
@@ -64,46 +77,81 @@ spec:
       labels:
         io.kompose.service: app
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 33
+        runAsGroup: 33
+        fsGroup: 33
       containers:
-        - env:
-            - name: DB_DATABASE
-              value: laravel_db
-            - name: DB_HOST
-              value: db
-            - name: DB_PASSWORD
-              value: laravel_password
-            - name: DB_PORT
-              value: "3306"
-            - name: DB_USERNAME
-              value: laravel_user
-            - name: REDIS_CLIENT
-              value: phpredis
-            - name: REDIS_HOST
-              value: redis
-            - name: REDIS_PASSWORD
-              value: password_secure
-            - name: REDIS_PORT
-              value: "6379"
+        - name: laravel-app
           image: laravel-app:dev
-          imagePullPolicy: Never
-          name: laravel-app
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
           ports:
             - containerPort: 8000
               protocol: TCP
+          env:
+            - name: DB_HOST
+              value: "db"
+            - name: DB_DATABASE
+              value: "laravel_db"
+            - name: DB_USERNAME
+              value: "laravel_user"
+            - name: DB_PORT
+              value: "3306"
+            - name: REDIS_CLIENT
+              value: "phpredis"
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: laravel-secrets
+                  key: DB_PASSWORD
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: laravel-secrets
+                  key: REDIS_PASSWORD
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          startupProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
           readinessProbe:
             tcpSocket:
               port: 8000
             initialDelaySeconds: 5
             periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
       restartPolicy: Always
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  name: db
   labels:
     io.kompose.service: db
-  name: db
 spec:
   replicas: 1
   selector:
@@ -116,23 +164,46 @@ spec:
       labels:
         io.kompose.service: db
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
       containers:
         - name: laravel-mysql-db
           image: mysql:8.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           env:
-            - name: MYSQL_ROOT_PASSWORD
-              value: "root_password"
             - name: MYSQL_DATABASE
               value: "laravel_db"
             - name: MYSQL_USER
               value: "laravel_user"
-            - name: MYSQL_PASSWORD
-              value: "laravel_password"
             - name: MYSQL_ROOT_HOST
-              value: "%"
+              value: "127.0.0.1"
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: laravel-secrets
+                  key: DB_PASSWORD
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: laravel-secrets
+                  key: MYSQL_ROOT_PASSWORD
           ports:
             - containerPort: 3306
               protocol: TCP
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
           livenessProbe:
             exec:
               command:
@@ -141,11 +212,11 @@ spec:
                 - -h
                 - 127.0.0.1
                 - -uroot
-                - -proot_password
-            failureThreshold: 5
+                - -p$(MYSQL_ROOT_PASSWORD)
             initialDelaySeconds: 20
             periodSeconds: 10
             timeoutSeconds: 5
+            failureThreshold: 5
           volumeMounts:
             - mountPath: /var/lib/mysql
               name: laravel-db-data
@@ -159,23 +230,23 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
+  name: laravel-db-data
   labels:
     io.kompose.service: laravel-db-data
-  name: laravel-db-data
 spec:
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 100Mi
+      storage: 1Gi
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  name: redis
   labels:
     io.kompose.service: redis
-  name: redis
 spec:
   replicas: 1
   selector:
@@ -188,26 +259,49 @@ spec:
       labels:
         io.kompose.service: redis
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
       containers:
-        - args:
+        - name: laravel-redis
+          image: redis:7.2-alpine
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          args:
             - redis-server
             - --requirepass
-            - password_secure
-          image: redis:7.2-alpine
-          livenessProbe:
-            exec:
-              command:
-                - redis-cli
-                - -a
-                - password_secure
-                - ping
-            failureThreshold: 5
-            periodSeconds: 5
-            timeoutSeconds: 3
-          name: laravel-redis
+            - $(REDIS_PASSWORD)
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: laravel-secrets
+                  key: REDIS_PASSWORD
           ports:
             - containerPort: 6379
               protocol: TCP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli -a "$REDIS_PASSWORD" ping | grep PONG
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 5
           volumeMounts:
             - mountPath: /data
               name: redis-data
@@ -221,12 +315,12 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
+  name: redis-data
   labels:
     io.kompose.service: redis-data
-  name: redis-data
 spec:
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 100Mi
+      storage: 500Mi

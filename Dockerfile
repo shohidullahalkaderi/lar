@@ -1,6 +1,9 @@
-FROM php:8.4-cli
+# Stage : Builder
+FROM php:8.4-cli AS builder
 
-# Install only the absolute essentials for Composer and MySQL/Redis drivers
+WORKDIR /usr/src/app
+
+# Install build dependencies & PHP extensions
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libzip-dev \
         zip \
@@ -9,24 +12,51 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && pecl install redis && docker-php-ext-enable redis \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Composer
+# Install Composer from official image
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
-# Set the working directory
-WORKDIR /usr/src/app
-
-# Copy composer files first (completely optional)
+# Copy dependency manifests
 COPY composer.json* composer.lock* ./
 
-# Broken across lines exactly like the Django logic for clean layout readability
-RUN [ -f composer.json ] && composer install --no-interaction --no-plugins --no-scripts --prefer-dist || \
-    echo "composer.json not found, skipping installation."
+# Install vendor dependencies (optimized for production build)
+RUN if [ -f composer.json ]; then \
+        composer install --no-dev --no-interaction --no-plugins --no-scripts --prefer-dist --optimize-autoloader; \
+    else \
+        echo "composer.json not found, skipping installation."; \
+    fi
 
-# Explicitly copy remaining codebase into WORKDIR
-COPY . .
+# Stage : Production Runtime
+FROM php:8.4-cli AS runner
 
-# Expose HTTP port 
+WORKDIR /usr/src/app
+
+# Install runtime dependencies including netcat-openbsd for nc healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libzip-dev \
+        netcat-openbsd \
+    && docker-php-ext-install pdo_mysql bcmath zip \
+    && pecl install redis && docker-php-ext-enable redis \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed composer packages from builder stage
+COPY --from=builder /usr/src/app/vendor ./vendor
+
+# Copy codebase with correct ownership
+COPY --chown=www-data:www-data . .
+
+# Set permissions for Laravel storage & cache directories
+RUN mkdir -p storage bootstrap/cache \
+    && chown -R www-data:www-data storage bootstrap/cache \
+    && chmod -R 775 storage bootstrap/cache
+
+# Switch to non-root execution (www-data UID/GID 33)
+USER www-data
+
 EXPOSE 8000
 
-# Default command – runs the Laravel development server
+# Universal container healthcheck using netcat
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD nc -z 0 8000 || exit 1
+
+# Production server entrypoint
 CMD ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8000"]
