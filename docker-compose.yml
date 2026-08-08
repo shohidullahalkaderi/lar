@@ -3,7 +3,7 @@ services:
     build: .
     container_name: laravel_app
     restart: unless-stopped
-    volumes: 
+    volumes:
       - .:/usr/src/app
     ports:
       - "8080:8000"

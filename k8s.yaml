@@ -5,6 +5,11 @@ metadata:
   labels:
     app.kubernetes.io/name: laravel-app
 type: Opaque
+# NOTE: Plaintext credentials in stringData are only base64-encoded at rest,
+# not encrypted. Fine for local kind/Docker Desktop, but before a real
+# production apply these should come from `kubectl create secret` off an
+# untracked env file, or a secrets manager (Sealed Secrets / External
+# Secrets Operator / SOPS) instead of being committed here.
 stringData:
   DB_PASSWORD: "laravel_password"
   MYSQL_ROOT_PASSWORD: "root_password"
@@ -77,14 +82,21 @@ spec:
       labels:
         io.kompose.service: app
     spec:
+      # Matches numeric UID/GID 10001 defined in the Dockerfile
       securityContext:
         runAsNonRoot: true
-        runAsUser: 33
-        runAsGroup: 33
-        fsGroup: 33
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
       containers:
         - name: laravel-app
           image: laravel-app:dev
+          # MODIFIED: Always -> IfNotPresent. Same reason as the Django app:
+          # this image is built locally for kind/Docker Desktop and never
+          # pushed to a registry, so Always caused ErrImagePull/
+          # ImagePullBackOff. IfNotPresent uses the image already loaded
+          # into the cluster's local store. Switch to Always + an immutable
+          # tag (e.g. git SHA) pushed to a real registry for actual prod.
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
@@ -172,6 +184,8 @@ spec:
       containers:
         - name: laravel-mysql-db
           image: mysql:8.0
+          # No imagePullPolicy override — defaults to IfNotPresent, correct
+          # for a fixed, versioned upstream tag.
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -206,13 +220,12 @@ spec:
               memory: 1Gi
           livenessProbe:
             exec:
+              # Invoked sh -c to expand $MYSQL_ROOT_PASSWORD properly during
+              # liveness checks
               command:
-                - mysqladmin
-                - ping
-                - -h
-                - 127.0.0.1
-                - -uroot
-                - -p$(MYSQL_ROOT_PASSWORD)
+                - sh
+                - -c
+                - mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"
             initialDelaySeconds: 20
             periodSeconds: 10
             timeoutSeconds: 5
@@ -267,6 +280,7 @@ spec:
       containers:
         - name: laravel-redis
           image: redis:7.2-alpine
+          # No imagePullPolicy override — same reasoning as db.
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
