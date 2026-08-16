@@ -1,15 +1,19 @@
 # local-image
-FROM php:8.4-cli
+FROM dunglas/frankenphp:1-php8.4
 
-# OPTIMIZATION: Removed redundant OS 'zip' package (unzip + libzip-dev are all PHP/Composer need)
-# Retained netcat-openbsd to support the original nc -z healthcheck
+# Install system dependencies and netcat for healthchecks
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libzip-dev \
-        unzip \
-        netcat-openbsd \
-    && docker-php-ext-install pdo_mysql bcmath zip \
-    && pecl install redis && docker-php-ext-enable redis \
+    netcat-openbsd \
+    libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
+
+# Install PHP extensions safely using the built-in helper
+RUN install-php-extensions \
+    pdo_mysql \
+    bcmath \
+    zip \
+    pcntl \
+    redis
 
 # Install Composer
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
@@ -33,8 +37,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD nc -z 0 8000 || exit 1
 
-# Default command – runs the Laravel development server
-CMD ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8000"]
+# Runs Laravel Octane with FrankenPHP
+CMD ["php", "artisan", "octane:start", "--server=frankenphp", "--host=0.0.0.0", "--port=8000"]
 
 #-# #-# #-#
 

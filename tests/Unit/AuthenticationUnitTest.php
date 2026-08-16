@@ -3,8 +3,11 @@
 namespace Tests\Unit;
 
 use App\Http\Requests\StoreUserCollectionRequest;
+use App\Http\Requests\StoreMessageRequest;
 use App\Http\Resources\UserResource;
+use App\Http\Resources\MessageResource;
 use App\Models\User;
+use App\Models\Message;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Redis;
@@ -85,5 +88,47 @@ class AuthenticationUnitTest extends TestCase
         // 3. Destruct and assert clean state post-execution
         Redis::del($testKey);
         $this->assertNull(Redis::get($testKey));
+    }
+
+    /**
+     * --- Test Message validation, model persistence, and resource transformation constraints ---
+     */
+
+    public function test_message_model_and_resource_constraints(): void
+    {
+        $request = new StoreMessageRequest();
+
+        // 1. Assert invalid input fails request validation rules
+        $invalidPayload = [
+            'sender_id' => '',
+            'message'   => '',
+        ];
+        $invalidValidator = Validator::make($invalidPayload, $request->rules());
+        $this->assertFalse($invalidValidator->passes());
+        $this->assertArrayHasKey('sender_id', $invalidValidator->errors()->toArray());
+        $this->assertArrayHasKey('message', $invalidValidator->errors()->toArray());
+
+        // 2. Assert valid input passes request validation rules
+        $validPayload = [
+            'sender_id' => 101,
+            'auth_id'   => 101,
+            'message'   => 'Automated test suite message payload verification.',
+        ];
+        $validValidator = Validator::make($validPayload, $request->rules());
+        $this->assertTrue($validValidator->passes());
+
+        // 3. Test Message database persistence via Eloquent
+        $message = Message::create($validPayload);
+        $this->assertNotNull($message->id);
+        $this->assertEquals(101, $message->sender_id);
+        $this->assertEquals(101, $message->auth_id);
+
+        // 4. Test MessageResource data transformation output
+        $resource = (new MessageResource($message))->resolve();
+        $this->assertEquals(101, $resource['sender_id']);
+        $this->assertEquals(101, $resource['auth_id']);
+        $this->assertEquals('Automated test suite message payload verification.', $resource['message']);
+        $this->assertIsInt($resource['id']);
+        $this->assertIsString($resource['created_at']);
     }
 }

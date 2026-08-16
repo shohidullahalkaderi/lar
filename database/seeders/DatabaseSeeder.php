@@ -16,6 +16,7 @@ class DatabaseSeeder extends Seeder
     {
         $this->call([
             UserSeeder::class,
+            MessageSeeder::class,
         ]);
 
         $this->command->info('Database seeding completed successfully!');
