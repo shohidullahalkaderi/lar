@@ -53,7 +53,7 @@ kubectl get pods -n laravel-stack -w
 
 == 9. Trivy Privilege Escalation scan on the current directory
 trivy config --quiet --include-non-failures Dockerfile | grep -E "(DS-0002|DS-0006|DS-0027)"
-trivy config --quiet --include-non-failures k8s.yaml | grep -E "(KSV-0001|KSV-0003|KSV-0005|KSV-0012)"
+trivy config --quiet --include-non-failures k8s.yaml | grep -E "(KSV-0001|KSV-0003|KSV-0005|KSV-0012|KSV-0014)"
 
 == 10. test via terminal
 curl -I http://localhost:8090

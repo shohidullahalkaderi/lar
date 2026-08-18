@@ -100,8 +100,11 @@ USER 10001
 
 EXPOSE 8000
 
-# Standalone docker healthcheck (Kubernetes relies on liveness/readiness probes instead)
+# NOTE: kubelet does NOT read this HEALTHCHECK instruction — your
+# Deployment's startupProbe/readinessProbe/livenessProbe (tcpSocket on
+# 8000) are what actually govern pod health in the cluster. Kept only
+# for standalone `docker run` debugging; harmless, not a production risk.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD nc -z 0 8000 || exit 1
+    CMD nc -z 0 8000 || exit 1
 
 CMD ["php", "artisan", "octane:start", "--server=frankenphp", "--host=0.0.0.0", "--port=8000"]

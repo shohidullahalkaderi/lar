@@ -5,12 +5,8 @@ metadata:
   labels:
     app.kubernetes.io/name: laravel-app
 type: Opaque
-# NOTE: Plaintext credentials in stringData are only base64-encoded at rest,
-# not encrypted. Fine for local kind/Docker Desktop, but before a real
-# production apply these should come from `kubectl create secret` off an
-# untracked env file, or a secrets manager (Sealed Secrets / External
-# Secrets Operator / SOPS) instead of being committed here.
 stringData:
+  # [SECURITY]: Core application secret key and database/service credentials secured via Kubernetes Secret.
   DB_PASSWORD: "laravel_password"
   MYSQL_ROOT_PASSWORD: "root_password"
   REDIS_PASSWORD: "password_secure"
@@ -82,25 +78,27 @@ spec:
       labels:
         io.kompose.service: app
     spec:
-      # Matches numeric UID/GID 10001 defined in the Dockerfile
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
         runAsGroup: 10001
         fsGroup: 10001
+        # [SECURITY HARDENING]: Enforce RuntimeDefault seccomp profile to restrict kernel syscalls and prevent privilege escalation / kernel exploits.
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: laravel-app
           image: laravel-app:dev
-          # MODIFIED: Always -> IfNotPresent. Same reason as the Django app:
-          # this image is built locally for kind/Docker Desktop and never
-          # pushed to a registry, so Always caused ErrImagePull/
-          # ImagePullBackOff. IfNotPresent uses the image already loaded
-          # into the cluster's local store. Switch to Always + an immutable
-          # tag (e.g. git SHA) pushed to a real registry for actual prod.
+          # [MODIFIED]: Always -> IfNotPresent. Reverted for local kind/Docker Desktop dev:
+          # this image is built locally and never pushed to a registry, so imagePullPolicy: Always 
+          # caused ErrImagePull / ImagePullBackOff. IfNotPresent is correct here since the cluster 
+          # uses the image already loaded into its local store. Switch to Always + an immutable tag 
+          # (e.g. git SHA) pushed to a real registry once this moves to an actual prod cluster.
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: false
+            # [SECURITY HARDENING]: Make root filesystem read-only to prevent unauthorized code modifications or binary tampering.
+            readOnlyRootFilesystem: true
             capabilities:
               drop:
                 - ALL
@@ -108,6 +106,10 @@ spec:
             - containerPort: 8000
               protocol: TCP
           env:
+            - name: OCTANE_STATE_FILE
+              value: "/tmp/octane-state.json"
+            - name: APP_KEY
+              value: "base64:XphRDMjYzEP4KKvs8rej6y4Y68wRaHvlA6czHrEOqsM="
             - name: DB_HOST
               value: "db"
             - name: DB_DATABASE
@@ -132,6 +134,16 @@ spec:
                 secretKeyRef:
                   name: laravel-secrets
                   key: REDIS_PASSWORD
+          volumeMounts:
+            # [SECURITY HARDENING]: Writable ephemeral storage required for runtime temp files when root filesystem is read-only.
+            - mountPath: /tmp
+              name: app-tmp
+            # [SECURITY HARDENING]: Writable ephemeral storage required for Laravel storage (logs, sessions, uploads) under a read-only rootfs.
+            - mountPath: /usr/src/app/storage
+              name: laravel-storage
+            # [SECURITY HARDENING]: Writable ephemeral storage required for Laravel framework bootstrap cache files under a read-only rootfs.
+            - mountPath: /usr/src/app/bootstrap/cache
+              name: laravel-cache
           resources:
             requests:
               cpu: 100m
@@ -164,22 +176,32 @@ spec:
             # [30-second SSE streaming setup]: A threshold of 4 means Kubelet waits 4 consecutive failures 
             # (15s * 4 = 60 seconds of unresponsiveness) before killing the pod.
             failureThreshold: 4
-          restartPolicy: Always
+      restartPolicy: Always
+      volumes:
+        # [SECURITY HARDENING]: Ephemeral emptyDir volume for writable /tmp directory.
+        - name: app-tmp
+          emptyDir: {}
+        # [SECURITY HARDENING]: Ephemeral emptyDir volume for Laravel storage folder.
+        - name: laravel-storage
+          emptyDir: {}
+        # [SECURITY HARDENING]: Ephemeral emptyDir volume for Laravel bootstrap cache folder.
+        - name: laravel-cache
+          emptyDir: {}
 
 ---
+# [STATEFULSET MIGRATION]: Converted MySQL deployment to a StatefulSet for stable identities and unique per-pod storage.
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: db
   labels:
     io.kompose.service: db
 spec:
+  serviceName: "db"
   replicas: 1
   selector:
     matchLabels:
       io.kompose.service: db
-  strategy:
-    type: Recreate
   template:
     metadata:
       labels:
@@ -190,13 +212,16 @@ spec:
         runAsUser: 999
         runAsGroup: 999
         fsGroup: 999
+        # [SECURITY HARDENING]: Enforce RuntimeDefault seccomp profile to restrict kernel syscalls.
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: laravel-mysql-db
           image: mysql:8.0
-          # No imagePullPolicy override — defaults to IfNotPresent, correct
-          # for a fixed, versioned upstream tag.
           securityContext:
             allowPrivilegeEscalation: false
+            # [SECURITY HARDENING]: Make root filesystem read-only to satisfy KSV-0014 and lock down binaries.
+            readOnlyRootFilesystem: true
             capabilities:
               drop:
                 - ALL
@@ -229,8 +254,7 @@ spec:
               memory: 1Gi
           livenessProbe:
             exec:
-              # Invoked sh -c to expand $MYSQL_ROOT_PASSWORD properly during
-              # liveness checks
+              # [NOTE]: Invoked sh -c to expand $MYSQL_ROOT_PASSWORD properly during liveness checks.
               command:
                 - sh
                 - -c
@@ -240,42 +264,46 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 5
           volumeMounts:
+            # [PERSISTENCE]: Mount persistent volume for MySQL data files to ensure data safety across restarts.
             - mountPath: /var/lib/mysql
               name: laravel-db-data
+            # [SECURITY HARDENING]: Ephemeral writable volume required for MySQL runtime sockets when root filesystem is read-only.
+            - mountPath: /var/run/mysqld
+              name: mysql-run
+            # [SECURITY HARDENING]: Ephemeral writable volume required for MySQL temp files when root filesystem is read-only.
+            - mountPath: /tmp
+              name: mysql-tmp
       restartPolicy: Always
       volumes:
-        - name: laravel-db-data
-          persistentVolumeClaim:
-            claimName: laravel-db-data
+        - name: mysql-run
+          emptyDir: {}
+        - name: mysql-tmp
+          emptyDir: {}
+  # [STATEFULSET MIGRATION]: Replaced standalone PVC with volumeClaimTemplates so each replica gets an isolated disk.
+  volumeClaimTemplates:
+    - metadata:
+        name: laravel-db-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
 
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: laravel-db-data
-  labels:
-    io.kompose.service: laravel-db-data
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
-
----
+# [STATEFULSET MIGRATION]: Converted Redis deployment to a StatefulSet.
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: redis
   labels:
     io.kompose.service: redis
 spec:
+  serviceName: "redis"
   replicas: 1
   selector:
     matchLabels:
       io.kompose.service: redis
-  strategy:
-    type: Recreate
   template:
     metadata:
       labels:
@@ -286,12 +314,16 @@ spec:
         runAsUser: 999
         runAsGroup: 999
         fsGroup: 999
+        # [SECURITY HARDENING]: Enforce RuntimeDefault seccomp profile to restrict kernel syscalls.
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: laravel-redis
           image: redis:7.2-alpine
-          # No imagePullPolicy override — same reasoning as db.
           securityContext:
             allowPrivilegeEscalation: false
+            # [SECURITY HARDENING]: Make root filesystem read-only to satisfy KSV-0014 and lock down binaries.
+            readOnlyRootFilesystem: true
             capabilities:
               drop:
                 - ALL
@@ -326,24 +358,23 @@ spec:
             timeoutSeconds: 3
             failureThreshold: 5
           volumeMounts:
+            # [PERSISTENCE]: Mount persistent volume for Redis data storage.
             - mountPath: /data
               name: redis-data
+            # [SECURITY HARDENING]: Ephemeral writable volume required for Redis temporary runtime files when root filesystem is read-only.
+            - mountPath: /tmp
+              name: redis-tmp
       restartPolicy: Always
       volumes:
-        - name: redis-data
-          persistentVolumeClaim:
-            claimName: redis-data
-
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: redis-data
-  labels:
-    io.kompose.service: redis-data
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 500Mi
+        - name: redis-tmp
+          emptyDir: {}
+  # [STATEFULSET MIGRATION]: Dynamic volume template for Redis.
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 500Mi

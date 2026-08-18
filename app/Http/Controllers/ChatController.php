@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Redis;
 use App\Models\Message;
 use App\Http\Resources\MessageResource;
 use App\Http\Requests\StoreMessageRequest;
+use Symfony\Component\HttpFoundation\Response;
 
 class ChatController extends Controller
 {
@@ -15,66 +16,91 @@ class ChatController extends Controller
      */
     public function sendMessage(StoreMessageRequest $request)
     {
-        $validated = $request->validated();
+        try {
+            $validated = $request->validated();
+            
+            // Ensure authenticated user ID is attached to the payload if not handled by request
+            $validated['auth_id'] = $request->user()->id;
 
-        // 1. Durability: Save permanently to MySQL database via Eloquent
-        $message = Message::create($validated);
-        $payload = (new MessageResource($message))->resolve();
-        $jsonPayload = json_encode($payload);
+            // 1. Durability: Save permanently to MySQL database via Eloquent
+            $message = Message::create($validated);
+            $payload = (new MessageResource($message))->resolve();
+            $jsonPayload = json_encode($payload);
 
-        // 2. Real-Time Broadcasting: Publish live event to Redis channel
-        Redis::publish('chat-channel', $jsonPayload);
+            // 2. Real-Time Broadcasting: Publish live event to Redis channel
+            Redis::publish('chat-channel', $jsonPayload);
 
-        // 3. Store latest pointers for fast cache-based reference
-        Redis::setex('latest_chat_id', 3600, $message->id);
-        Redis::setex('latest_chat_message', 3600, $jsonPayload);
+            // 3. Store latest global pointers for fast cache-based reference
+            Redis::setex('latest_chat_id', 3600, $message->id);
+            Redis::setex('latest_chat_message', 3600, $jsonPayload);
 
-        return response()->json([
-            'status' => 'success',
-            'data' => $payload
-        ], 201);
+            return response()->json([
+                'detail' => $payload
+            ], Response::HTTP_CREATED);
+
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json([
+                'detail' => 'Invalid message provided.'
+            ], Response::HTTP_BAD_REQUEST);
+        } catch (\Exception $e) {
+            return response()->json([
+                'detail' => $e->getMessage()
+            ], Response::HTTP_INTERNAL_SERVER_ERROR);
+        }
     }
 
     /**
      * Production-Ready SSE Stream Route (Kubernetes Native / No Nginx):
      * - 30-second maximum connection lifetime recycling window
-     * - MySQL offline catch-up backfilling for missed/seeded messages (defaults to 0 if after_id omitted)
-     * - Robust polling loop with incremental database backfilling for multi-message gaps (without pings)
+     * - Server-side stateful delta tracking per user with strict 0-fallback for seeded history
+     * - Polling loop with incremental database backfilling for multi-message gaps
      */
     public function stream(Request $request)
     {
         set_time_limit(0);
 
-        $afterIdParam = $request->query('after_id', null);
+        $user = $request->user();
+        if (!$user) {
+            return response()->json(
+                ['detail' => 'Invalid auth token provided.'], 
+                Response::HTTP_UNAUTHORIZED
+            );
+        }
 
-        // Default to 0 if after_id is omitted so offline history / seeded messages are fetched
-        try {
-            $lastSentId = $afterIdParam !== null ? (int) $afterIdParam : 0;
-        } catch (\Exception $e) {
+        $redisCursorKey = "chat:user_last_seen:{$user->id}";
+        $lastSeenIdStr = Redis::get($redisCursorKey);
+
+        if ($lastSeenIdStr !== null) {
+            $lastSentId = (int) $lastSeenIdStr;
+        } else {
+            // Force fallback to 0 on first connection.
+            // Guarantees seeded database messages are backfilled in Kubernetes even if Redis keys reset.
             $lastSentId = 0;
         }
 
-        // Offline Catch-Up: Fetch missed messages from MySQL starting from $lastSentId
+        // Server-Side Delta Query: Fetch only messages strictly greater than the user's last seen ID
         $missedMessages = [];
         try {
             $newMessages = Message::where('id', '>', $lastSentId)->orderBy('id')->get();
             if ($newMessages->isNotEmpty()) {
                 $missedMessages = MessageResource::collection($newMessages)->resolve();
                 $lastSentId = $newMessages->last()->id;
+                // Update user cursor state in Redis
+                Redis::set($redisCursorKey, $lastSentId);
             }
         } catch (\Exception $e) {
-            // Fallback or log if query fails
+            // Log or fallback on database error
         }
 
-        return response()->stream(function () use (&$lastSentId, $missedMessages) {
+        return response()->stream(function () use (&$lastSentId, $missedMessages, $redisCursorKey) {
             $startTime = time();
             $maxDuration = 30; // 30-second connection lifetime recycling window
 
             // Connection success handshake
-            echo "data: " . json_encode(['message' => 'Connected to SSE stream successfully']) . "\n\n";
+            echo "data: " . json_encode(['detail' => 'Connected to SSE stream successfully']) . "\n\n";
             @flush();
 
-            // Deliver any missed/seeded historical messages from MySQL catch-up first
+            // Deliver server-side delta-queried missed messages first
             foreach ($missedMessages as $msg) {
                 echo "data: " . json_encode($msg) . "\n\n";
                 @flush();
@@ -83,7 +109,7 @@ class ChatController extends Controller
             try {
                 while (true) {
                     if ((time() - $startTime) > $maxDuration) {
-                        break; // Gracefully close connection after 30 seconds for pod/worker recycling
+                        break; // Gracefully close connection after 30 seconds for worker recycling
                     }
 
                     if (connection_aborted()) {
@@ -106,15 +132,18 @@ class ChatController extends Controller
                                 @flush();
                             }
                             $lastSentId = (int) $latestId;
+                            // Automatically advance user's cursor state in Redis
+                            Redis::set($redisCursorKey, $lastSentId);
                         }
                     }
 
                     usleep(500000); // 0.5s pause to maintain non-blocking execution efficiency
                 }
             } catch (\Exception $e) {
-                // Graceful cleanup on client drop or exception
+                echo "data: " . json_encode(['detail' => $e->getMessage()]) . "\n\n";
+                @flush();
             }
-        }, 200, [
+        }, Response::HTTP_OK, [
             'Content-Type' => 'text/event-stream',
             'Cache-Control' => 'no-cache',
             'Connection' => 'keep-alive',
@@ -123,14 +152,24 @@ class ChatController extends Controller
 
     /**
      * Fallback historical fetch endpoint backed directly by MySQL.
-     * Defaults to ID 0 if after_id is omitted to ensure seeded messages are returned.
+     * Uses server-side Redis session tracking if after_id is omitted.
      */
     public function fetchMessages(Request $request)
     {
+        $user = $request->user();
+        if (!$user) {
+            return response()->json(
+                ['detail' => 'Invalid auth token provided.'], 
+                Response::HTTP_UNAUTHORIZED
+            );
+        }
+
         $afterIdParam = $request->query('after_id', null);
 
         if ($afterIdParam === null) {
-            $afterId = 0;
+            $redisCursorKey = "chat:user_last_seen:{$user->id}";
+            $lastSeenIdStr = Redis::get($redisCursorKey);
+            $afterId = $lastSeenIdStr !== null ? (int) $lastSeenIdStr : 0;
         } else {
             try {
                 $afterId = (int) $afterIdParam;
@@ -139,11 +178,21 @@ class ChatController extends Controller
             }
         }
 
-        $messages = Message::where('id', '>', $afterId)->orderBy('id')->get();
+        try {
+            $messages = Message::where('id', '>', $afterId)->orderBy('id')->get();
 
-        return response()->json([
-            'status' => 'success',
-            'data' => MessageResource::collection($messages)
-        ], 200);
+            if ($messages->isNotEmpty()) {
+                Redis::set("chat:user_last_seen:{$user->id}", $messages->last()->id);
+            }
+
+            return response()->json([
+                'detail' => MessageResource::collection($messages)
+            ], Response::HTTP_OK);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'detail' => $e->getMessage()
+            ], Response::HTTP_INTERNAL_SERVER_ERROR);
+        }
     }
 }
