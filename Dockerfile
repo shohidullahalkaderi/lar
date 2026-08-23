@@ -24,9 +24,9 @@ COPY . .
 
 RUN php artisan octane:install --server=frankenphp --no-interaction
 
-# Pre-create all required Laravel storage subdirectories in builder
-RUN mkdir -p storage/framework/{sessions,views,cache} storage/logs bootstrap/cache
-
+# [CRITICAL ADDITION]: Create storage directories and bake the public symlink into the image
+RUN mkdir -p storage/framework/{sessions,views,cache} storage/logs bootstrap/cache storage/app/public \
+    && php artisan storage:link
 
 # Stage : Production Runtime
 FROM dunglas/frankenphp:1-php8.4 AS runner

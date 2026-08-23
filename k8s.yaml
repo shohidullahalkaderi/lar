@@ -12,6 +12,21 @@ stringData:
   REDIS_PASSWORD: "password_secure"
 
 ---
+# [PERSISTENCE]: Standalone Persistent Volume Claim for media uploads (bypasses hostPath / VS Code sync).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: laravel-media-pvc
+  labels:
+    io.kompose.service: app
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -106,6 +121,10 @@ spec:
             - containerPort: 8000
               protocol: TCP
           env:
+            - name: XDG_CONFIG_HOME
+              value: "/tmp"
+            - name: XDG_DATA_HOME
+              value: "/tmp"
             - name: OCTANE_STATE_FILE
               value: "/tmp/octane-state.json"
             - name: APP_KEY
@@ -138,12 +157,17 @@ spec:
             # [SECURITY HARDENING]: Writable ephemeral storage required for runtime temp files when root filesystem is read-only.
             - mountPath: /tmp
               name: app-tmp
-            # [SECURITY HARDENING]: Writable ephemeral storage required for Laravel storage (logs, sessions, uploads) under a read-only rootfs.
-            - mountPath: /usr/src/app/storage
-              name: laravel-storage
-            # [SECURITY HARDENING]: Writable ephemeral storage required for Laravel framework bootstrap cache files under a read-only rootfs.
+            # [SECURITY HARDENING]: Writable ephemeral storage required for Laravel framework bootstrap cache files.
             - mountPath: /usr/src/app/bootstrap/cache
               name: laravel-cache
+            # [SECURITY HARDENING]: Writable ephemeral storage for framework states and logs.
+            - mountPath: /usr/src/app/storage/framework
+              name: laravel-framework
+            - mountPath: /usr/src/app/storage/logs
+              name: laravel-logs
+            # [PERSISTENCE]: Persistent volume mount for media uploads so they survive pod restarts.
+            - mountPath: /usr/src/app/storage/app/public
+              name: laravel-media
           resources:
             requests:
               cpu: 100m
@@ -181,12 +205,19 @@ spec:
         # [SECURITY HARDENING]: Ephemeral emptyDir volume for writable /tmp directory.
         - name: app-tmp
           emptyDir: {}
-        # [SECURITY HARDENING]: Ephemeral emptyDir volume for Laravel storage folder.
-        - name: laravel-storage
-          emptyDir: {}
         # [SECURITY HARDENING]: Ephemeral emptyDir volume for Laravel bootstrap cache folder.
         - name: laravel-cache
           emptyDir: {}
+        # [SECURITY HARDENING]: Ephemeral emptyDir volume for Laravel framework storage.
+        - name: laravel-framework
+          emptyDir: {}
+        # [SECURITY HARDENING]: Ephemeral emptyDir volume for Laravel logs storage.
+        - name: laravel-logs
+          emptyDir: {}
+        # [PERSISTENCE]: Persistent Volume Claim backing user media uploads.
+        - name: laravel-media
+          persistentVolumeClaim:
+            claimName: laravel-media-pvc
 
 ---
 # [STATEFULSET MIGRATION]: Converted MySQL deployment to a StatefulSet for stable identities and unique per-pod storage.

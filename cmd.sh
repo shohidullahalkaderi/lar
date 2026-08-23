@@ -18,3 +18,10 @@ docker compose exec app ls -la /usr/src/app
 docker compose exec app php artisan db:seed
 docker compose exec app php artisan config:clear
 docker compose exec app env DB_CONNECTION=sqlite DB_DATABASE=:memory: php artisan test --do-not-cache-result
+
+# unlink storage symlink during container build and re-link again
+docker compose exec app php artisan storage:unlink
+docker compose exec app php artisan storage:link
+
+# test media files inside shell
+# docker compose exec app php artisan tinker
