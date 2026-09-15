@@ -6,9 +6,11 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreUserCollectionRequest;
 use App\Http\Resources\UserResource;
 use App\Models\User;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\Response;
@@ -16,32 +18,48 @@ use Symfony\Component\HttpFoundation\Response;
 class AuthController extends Controller
 {
     public function register(StoreUserCollectionRequest $request): JsonResponse
-{
-    $validated = $request->validated();
+    {
+        $validated = $request->validated();
 
-    $email = strtolower(trim($validated['email']));
+        $email = strtolower(trim($validated['email']));
 
-    // Safely handle optional name
-    $nameInput = $validated['name'] ?? null;
-    $name = !empty($nameInput) 
-        ? trim($nameInput) 
-        : Str::slug(explode('@', $email)[0], '_') . '_' . Str::random(8);
+        // Safely handle optional name
+        $nameInput = $validated['name'] ?? null;
+        $name = !empty($nameInput) 
+            ? trim($nameInput) 
+            : Str::slug(explode('@', $email)[0], '_') . '_' . Str::random(8);
 
-    $user = User::create([
-        'name'       => $name,
-        'email'      => $email,
-        'password'   => Hash::make($validated['password']),
-        'first_name' => $validated['first_name'] ?? null,
-        'last_name'  => $validated['last_name'] ?? null,
-    ]);
+        try {
+            $user = DB::transaction(function () use ($validated, $email, $name) {
+                return User::create([
+                    'name'       => $name,
+                    'email'      => $email,
+                    'password'   => Hash::make($validated['password']),
+                    'first_name' => $validated['first_name'] ?? null,
+                    'last_name'  => $validated['last_name'] ?? null,
+                ]);
+            });
+        } catch (QueryException $e) {
+            // Check for duplicate entry error code (MySQL: 1062, PostgreSQL: 23505)
+            if ($e->errorInfo[1] === 1062 || $e->getCode() === '23505') {
+                return response()->json([
+                    'message' => 'The given data was invalid.',
+                    'errors' => [
+                        'email' => ['The email or name has already been taken.']
+                    ]
+                ], Response::HTTP_UNPROCESSABLE_ENTITY);
+            }
 
-    $tokenResult = $user->createToken('auth_token');
+            throw $e;
+        }
 
-    return response()->json([
-        'user'  => new UserResource($user),
-        'token' => $tokenResult->plainTextToken
-    ], Response::HTTP_CREATED);
-}
+        $tokenResult = $user->createToken('auth_token');
+
+        return response()->json([
+            'user'  => new UserResource($user),
+            'token' => $tokenResult->plainTextToken
+        ], Response::HTTP_CREATED);
+    }
 
     public function login(Request $request): JsonResponse
     {

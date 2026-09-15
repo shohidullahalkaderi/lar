@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Redis;
+use Illuminate\Support\Facades\DB;
 use App\Models\Message;
 use App\Http\Resources\MessageResource;
 use App\Http\Requests\StoreMessageRequest;
@@ -22,17 +23,30 @@ class ChatController extends Controller
             // Ensure authenticated user ID is attached to the payload if not handled by request
             $validated['auth_id'] = $request->user()->id;
 
-            // 1. Durability: Save permanently to MySQL database via Eloquent
-            $message = Message::create($validated);
+            // 1. Durability: Save permanently to MySQL database via transaction to prevent concurrency conflicts
+            $message = DB::transaction(function () use ($validated) {
+                return Message::create($validated);
+            });
+
             $payload = (new MessageResource($message))->resolve();
             $jsonPayload = json_encode($payload);
 
             // 2. Real-Time Broadcasting: Publish live event to Redis channel
             Redis::publish('chat-channel', $jsonPayload);
 
-            // 3. Store latest global pointers for fast cache-based reference
-            Redis::setex('latest_chat_id', 3600, $message->id);
-            Redis::setex('latest_chat_message', 3600, $jsonPayload);
+            // 3. Store latest global pointers atomically using a Redis Lua script.
+            // This prevents race conditions where a slower concurrent request 
+            // overwrites a newer 'latest_chat_id' with an older one.
+            $script = "
+                local current = redis.call('get', KEYS[1])
+                if not current or tonumber(ARGV[1]) > tonumber(current) then
+                    redis.call('setex', KEYS[1], 3600, ARGV[1])
+                    redis.call('setex', KEYS[2], 3600, ARGV[2])
+                    return 1
+                end
+                return 0
+            ";
+            Redis::eval($script, 2, 'latest_chat_id', 'latest_chat_message', $message->id, $jsonPayload);
 
             return response()->json([
                 'detail' => $payload
@@ -85,8 +99,17 @@ class ChatController extends Controller
             if ($newMessages->isNotEmpty()) {
                 $missedMessages = MessageResource::collection($newMessages)->resolve();
                 $lastSentId = $newMessages->last()->id;
-                // Update user cursor state in Redis
-                Redis::set($redisCursorKey, $lastSentId);
+                
+                // Safely update user cursor state in Redis (only if greater, preventing multi-tab race conditions)
+                $cursorScript = "
+                    local current = redis.call('get', KEYS[1])
+                    if not current or tonumber(ARGV[1]) > tonumber(current) then
+                        redis.call('set', KEYS[1], ARGV[1])
+                        return 1
+                    end
+                    return 0
+                ";
+                Redis::eval($cursorScript, 1, $redisCursorKey, $lastSentId);
             }
         } catch (\Exception $e) {
             // Log or fallback on database error
@@ -132,8 +155,17 @@ class ChatController extends Controller
                                 @flush();
                             }
                             $lastSentId = (int) $latestId;
-                            // Automatically advance user's cursor state in Redis
-                            Redis::set($redisCursorKey, $lastSentId);
+                            
+                            // Automatically advance user's cursor state in Redis atomically
+                            $cursorScript = "
+                                local current = redis.call('get', KEYS[1])
+                                if not current or tonumber(ARGV[1]) > tonumber(current) then
+                                    redis.call('set', KEYS[1], ARGV[1])
+                                    return 1
+                                end
+                                return 0
+                            ";
+                            Redis::eval($cursorScript, 1, $redisCursorKey, $lastSentId);
                         }
                     }
 
@@ -182,7 +214,19 @@ class ChatController extends Controller
             $messages = Message::where('id', '>', $afterId)->orderBy('id')->get();
 
             if ($messages->isNotEmpty()) {
-                Redis::set("chat:user_last_seen:{$user->id}", $messages->last()->id);
+                $maxId = $messages->last()->id;
+                $cursorKey = "chat:user_last_seen:{$user->id}";
+                
+                // Safely update user cursor state atomically using Lua script
+                $cursorScript = "
+                    local current = redis.call('get', KEYS[1])
+                    if not current or tonumber(ARGV[1]) > tonumber(current) then
+                        redis.call('set', KEYS[1], ARGV[1])
+                        return 1
+                    end
+                    return 0
+                ";
+                Redis::eval($cursorScript, 1, $cursorKey, $maxId);
             }
 
             return response()->json([
